@@ -1,0 +1,19 @@
+// Who may talk to whom. Anything not granted here is denied, so customer
+// phones can't reach each other, and nothing can reach our side from them.
+{
+  "tagOwners": {
+    // Phones of customers. Joined with a pre-auth key tagged tag:customer.
+    "tag:customer": ["loopctrl@"],
+    // Our control servers and operator machines.
+    "tag:operator": ["loopctrl@"],
+  },
+  "grants": [
+    // Operators reach LoopCtrl's automation API on customer phones. 8300 is
+    // LoopCtrl's default port; add any custom ports here.
+    {
+      "src": ["tag:operator"],
+      "dst": ["tag:customer"],
+      "ip": ["tcp:8300"],
+    },
+  ],
+}

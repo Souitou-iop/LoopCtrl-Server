@@ -1,0 +1,81 @@
+# Headscale v0.29.4. Only what differs from config-example.yaml matters here;
+# see https://github.com/juanfont/headscale/blob/v0.29.4/config-example.yaml
+server_url: https://HEADSCALE_DOMAIN
+listen_addr: 127.0.0.1:8085
+metrics_listen_addr: 127.0.0.1:9095
+grpc_listen_addr: 127.0.0.1:50443
+grpc_allow_insecure: false
+# nginx on this host terminates TLS and forwards the client address.
+trusted_proxies:
+  - 127.0.0.1/32
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+
+derp:
+  # Our own relay, reached through the same HTTPS name as the control server
+  # (DERP rides an HTTP upgrade through nginx), plus STUN on UDP 3478, which
+  # must be open in the cloud security group. Clients near it (mainland China)
+  # pick it over Tailscale's public relays, which stay listed as a fallback.
+  server:
+    enabled: true
+    region_id: 999
+    region_code: "loopctrl"
+    region_name: "LoopCtrl Relay"
+    verify_clients: true
+    stun_listen_addr: "0.0.0.0:3478"
+    private_key_path: /var/lib/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+    ipv4: SERVER_IPV4
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+  paths: []
+  auto_update_enabled: true
+  update_frequency: 3h
+
+disable_check_updates: true
+
+node:
+  # Customer phones must not drop off the tailnet on a timer.
+  expiry: 0
+  ephemeral:
+    inactivity_timeout: 30m
+
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+    wal_autocheckpoint: 1000
+
+log:
+  level: info
+  format: text
+
+policy:
+  mode: file
+  path: /etc/headscale/policy.hujson
+
+dns:
+  # Shadowrocket keeps doing the phone's DNS; we only use tailnet addresses.
+  magic_dns: true
+  base_domain: lc.internal
+  override_local_dns: false
+  nameservers:
+    global: []
+    split: {}
+  search_domains: []
+  extra_records: []
+
+unix_socket: /var/run/headscale/headscale.sock
+unix_socket_permission: "0770"
+
+logtail:
+  enabled: false
+taildrop:
+  enabled: false

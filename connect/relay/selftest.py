@@ -16,8 +16,11 @@ import base64
 import hashlib
 import hmac
 import importlib.util
+import io
 import json
+import os
 import secrets
+import sys
 import threading
 import time
 import urllib.error
@@ -152,6 +155,12 @@ def main() -> int:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{server.server_port}"
+    # Capture the event log for the whole run: it must name events but never
+    # carry a token.
+    os.environ["LOOPCTRL_RELAY_EVENT_LOG"] = "1"
+    events = io.StringIO()
+    real_stderr = sys.stderr
+    sys.stderr = events
 
     try:
         status, body = _get(base + "/healthz")
@@ -326,6 +335,14 @@ def main() -> int:
         _pending_wait_timeout_scenarios(operator)
         _sealed_envelope_scenario(base, operator)
 
+        log = events.getvalue()
+        for line in ("register status=201", "poll device=", "status=200 held=",
+                     "response device=", "rpc device="):
+            assert line in log, (line, log)
+        for secret in (operator, enrollment, device_token):
+            assert secret not in log, "event log leaked a token"
+        sys.stderr = real_stderr
+
         print("relay self-test: PASS")
         print("  registration, single-use enrollment, poll forwarding, response return")
         print("  device token survives a simulated 31-minute no-poll gap")
@@ -334,8 +351,10 @@ def main() -> int:
         print("  opaque request/response bytes")
         print("  unknown operator/device token rejection")
         print("  a real v1 sealed envelope opens after the round trip")
+        print("  event log records register/poll/response/rpc and no tokens")
         return 0
     finally:
+        sys.stderr = real_stderr
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)

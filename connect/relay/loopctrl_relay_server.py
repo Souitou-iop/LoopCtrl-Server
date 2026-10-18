@@ -347,6 +347,16 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 "%s - %s\n" % (self.address_string(), fmt % args)
             )
 
+    def _event(self, kind: str, **fields: Any) -> None:
+        """One line per relay event for gap analysis: device ids, statuses,
+        sizes and timings only — never tokens or bodies. Off unless
+        LOOPCTRL_RELAY_EVENT_LOG=1."""
+        if os.environ.get("LOOPCTRL_RELAY_EVENT_LOG") != "1":
+            return
+        parts = " ".join(f"{key}={value}" for key, value in fields.items())
+        sys.stderr.write(f"{time.time():.3f} {kind} {parts}\n")
+        sys.stderr.flush()
+
     def do_GET(self) -> None:
         path = urlsplit(self.path).path
         if path == "/healthz":
@@ -432,8 +442,10 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
                 name = candidate or name
         registered = self.relay.register_device(enrollment_token, name)
         if registered is None:
+            self._event("register", status=401)
             self._json(401, {"error": "unauthorized"})
             return
+        self._event("register", status=201, device=registered["device_id"])
         self._json(201, registered)
 
     def _poll(self) -> None:
@@ -441,12 +453,18 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
             _bearer(self.headers.get("Authorization"))
         )
         if session is None:
+            self._event("poll", status=401)
             self._json(401, {"error": "unauthorized"})
             return
+        started = time.monotonic()
         pending = self.relay.take_request(session, self.relay.poll_timeout)
+        held = f"{time.monotonic() - started:.2f}"
         if pending is None:
+            self._event("poll", device=session.device_id, status=204, held=held)
             self._empty(204)
             return
+        self._event("poll", device=session.device_id, status=200, held=held,
+                    request=pending.request_id[:8], bytes=len(pending.body))
         self._json(
             200,
             {
@@ -489,8 +507,11 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         if not self.relay.complete_request(
             session, request_id, status, response_body, content_type[:120]
         ):
+            self._event("response", device=session.device_id, status=404)
             self._json(404, {"error": "unknown_request"})
             return
+        self._event("response", device=session.device_id, request=request_id[:8],
+                    rpc_status=status, bytes=len(response_body))
         self._json(200, {"ok": True})
 
     def _operator_rpc(self, path: str) -> None:
@@ -511,14 +532,22 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         if not body:
             self._json(400, {"error": "empty_request"})
             return
+        started = time.monotonic()
         pending, failure = self.relay.enqueue(session, body)
         if pending is None:
+            self._event("rpc", device=device_id, status=failure)
             self._json(429 if failure == "device_busy" else 410, {"error": failure})
             return
         if not self.relay.wait_for_response(pending, session):
             self.relay.expire_pending(pending)
+            self._event("rpc", device=device_id, request=pending.request_id[:8],
+                        status=504, ms=int((time.monotonic() - started) * 1000))
             self._json(504, {"error": "device_timeout"})
             return
+        self._event("rpc", device=device_id, request=pending.request_id[:8],
+                    status=pending.status, bytes_in=len(body),
+                    bytes_out=len(pending.response_body),
+                    ms=int((time.monotonic() - started) * 1000))
         self._body(
             pending.status,
             pending.content_type,

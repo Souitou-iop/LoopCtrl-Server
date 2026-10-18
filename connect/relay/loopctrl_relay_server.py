@@ -209,10 +209,34 @@ class RelayState:
         try:
             session.queue.put_nowait(pending)
         except queue.Full:
-            with self._lock:
-                session.in_flight.pop(pending.request_id, None)
-            return None, "device_busy"
+            # Requests whose operator already timed out stay in the queue until
+            # a poll discards them. With the device away, four such leftovers
+            # would answer every later request "busy" although nothing is in
+            # flight; drop them and try once more.
+            self._purge_stale(session)
+            try:
+                session.queue.put_nowait(pending)
+            except queue.Full:
+                with self._lock:
+                    session.in_flight.pop(pending.request_id, None)
+                return None, "device_busy"
         return pending, None
+
+    def _purge_stale(self, session: _DeviceSession) -> None:
+        kept: list[_PendingRequest] = []
+        while True:
+            try:
+                item = session.queue.get_nowait()
+            except queue.Empty:
+                break
+            with self._lock:
+                if session.in_flight.get(item.request_id) is item:
+                    kept.append(item)
+        for item in kept:
+            try:
+                session.queue.put_nowait(item)
+            except queue.Full:
+                break
 
     def take_request(
         self, session: _DeviceSession, timeout: float

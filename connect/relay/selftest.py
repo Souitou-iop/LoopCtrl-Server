@@ -333,6 +333,7 @@ def main() -> int:
         assert json.loads(body)["devices"][0]["device_id"] == device_id
 
         _pending_wait_timeout_scenarios(operator)
+        _stale_queue_scenario(operator)
         _sealed_envelope_scenario(base, operator)
 
         log = events.getvalue()
@@ -351,6 +352,7 @@ def main() -> int:
         print("  opaque request/response bytes")
         print("  unknown operator/device token rejection")
         print("  a real v1 sealed envelope opens after the round trip")
+        print("  timed-out requests do not leave an away device 'busy'")
         print("  event log records register/poll/response/rpc and no tokens")
         return 0
     finally:
@@ -358,6 +360,30 @@ def main() -> int:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def _stale_queue_scenario(operator: str) -> None:
+    """Operator timeouts while the device is away must not leave the device
+    permanently "busy" (seen on a real iPhone after four 504s)."""
+    state = RelayState(operator, poll_timeout=0.05)
+    token, _ = state.create_enrollment()
+    registered = state.register_device(token, "away")
+    assert registered is not None
+    session = state.lookup_device_id(registered["device_id"])
+    assert session is not None
+    for _ in range(4):
+        pending, failure = state.enqueue(session, b"old")
+        assert pending is not None, failure
+        state.expire_pending(pending)  # what a 504 does
+    fresh, failure = state.enqueue(session, b"new")
+    assert fresh is not None and failure is None, failure
+    taken = state.take_request(session, 0.2)
+    assert taken is fresh, "the live request must be the next one handed out"
+    assert state.complete_request(session, fresh.request_id, 200, b"ok", "application/json")
+    # A genuinely full queue still answers busy.
+    live = [state.enqueue(session, b"live")[0] for _ in range(4)]
+    assert all(live)
+    assert state.enqueue(session, b"over") == (None, "device_busy")
 
 
 def _pending_wait_timeout_scenarios(operator: str) -> None:

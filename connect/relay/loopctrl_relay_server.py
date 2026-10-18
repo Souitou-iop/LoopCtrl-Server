@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-"""LoopCtrl Phase 0 relay: authenticated long-poll byte transport.
+"""LoopCtrl Phase 0 relay: authenticated repeated-poll byte transport.
 
 The relay never parses or decrypts LoopCtrl envelopes. A device registers with
-a one-time enrollment token, long-polls for work using its short-lived device
-token, forwards each opaque request to its local LoopCtrl /rpc endpoint, and
-posts the opaque response back. Operator requests are authenticated with a
+a one-time enrollment token, repeatedly polls for work using its short-lived
+device token, forwards each opaque request to its local LoopCtrl /rpc endpoint,
+and posts the opaque response back. Operator requests are authenticated with a
 separate process-level token.
+
+Each poll is an ordinary HTTP request. The server may hold that request open
+for up to `poll_timeout`, then answers `204`; the HTTP exchange closes after
+every cycle. This is not a persistent TCP/TLS socket.
 
 This is a local integration prototype. Put TLS in front of it for any
 non-loopback deployment; the optional --certfile/--keyfile flags can serve TLS
@@ -27,11 +31,14 @@ import threading
 import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlsplit
 
 DEFAULT_ENROLLMENT_TTL = 5 * 60
-DEFAULT_DEVICE_TTL = 3 * 60
+# Phase 0 must outlive a 30-minute background test plus reconnect margin. A
+# session is extended on every authenticated use; this is the maximum idle gap,
+# not a limit on total session lifetime.
+DEFAULT_DEVICE_TTL = 60 * 60
 DEFAULT_POLL_TIMEOUT = 25.0
 DEFAULT_OPERATOR_TIMEOUT = 60.0
 DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024
@@ -89,6 +96,7 @@ class RelayState:
         poll_timeout: float = DEFAULT_POLL_TIMEOUT,
         operator_timeout: float = DEFAULT_OPERATOR_TIMEOUT,
         max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         if not operator_token:
             raise ValueError("operator token is required")
@@ -98,6 +106,9 @@ class RelayState:
         self.poll_timeout = poll_timeout
         self.operator_timeout = operator_timeout
         self.max_body_bytes = max_body_bytes
+        # Wall-clock access goes through one seam so the no-poll-gap test can
+        # advance time without sleeping for the full TTL.
+        self._clock = clock
         self._lock = threading.Lock()
         self._enrollments: dict[bytes, float] = {}
         self._devices_by_token: dict[bytes, _DeviceSession] = {}
@@ -109,14 +120,14 @@ class RelayState:
     def create_enrollment(self, ttl: float | None = None) -> tuple[str, int]:
         lifetime = self.enrollment_ttl if ttl is None else max(ttl, 0.0)
         token = secrets.token_urlsafe(32)
-        expires_at = time.monotonic() + lifetime
+        expires_at = self._clock() + lifetime
         with self._lock:
-            self._drop_expired_locked(time.monotonic())
+            self._drop_expired_locked(self._clock())
             self._enrollments[_hash_token(token)] = expires_at
         return token, int(lifetime)
 
     def register_device(self, enrollment_token: str, name: str) -> dict[str, Any] | None:
-        now = time.monotonic()
+        now = self._clock()
         token_hash = _hash_token(enrollment_token)
         with self._lock:
             expires_at = self._enrollments.pop(token_hash, None)
@@ -142,7 +153,7 @@ class RelayState:
     def lookup_device_token(self, token: str | None) -> _DeviceSession | None:
         if not token:
             return None
-        now = time.monotonic()
+        now = self._clock()
         with self._lock:
             session = self._devices_by_token.get(_hash_token(token))
             if session is None:
@@ -154,7 +165,7 @@ class RelayState:
             return session
 
     def lookup_device_id(self, device_id: str) -> _DeviceSession | None:
-        now = time.monotonic()
+        now = self._clock()
         with self._lock:
             session = self._devices_by_id.get(device_id)
             if session is None:
@@ -166,7 +177,7 @@ class RelayState:
             return session
 
     def list_devices(self) -> list[dict[str, Any]]:
-        now = time.monotonic()
+        now = self._clock()
         with self._lock:
             self._drop_expired_locked(now)
             return [
@@ -238,7 +249,7 @@ class RelayState:
             pending.status = status
             pending.response_body = body
             pending.content_type = content_type
-            session.expires_at = time.monotonic() + self.device_ttl
+            session.expires_at = self._clock() + self.device_ttl
         pending.done.set()
         return True
 
@@ -579,7 +590,7 @@ def main() -> int:
         "--device-ttl",
         type=int,
         default=DEFAULT_DEVICE_TTL,
-        help="seconds a device token survives without use (default: 180)",
+        help="seconds a device token survives without use (default: 3600)",
     )
     args = parser.parse_args()
 

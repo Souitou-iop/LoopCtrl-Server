@@ -2,8 +2,8 @@
 """End-to-end self-test for the Phase 0 LoopCtrl relay.
 
 Runs the relay in-process on loopback, registers a fake device, waits for a
-long-poll, forwards the exact opaque envelope bytes to a fake loopback
-LoopCtrl endpoint, and verifies the operator receives the exact response.
+server-held poll cycle, forwards the exact opaque envelope bytes to a fake
+loopback LoopCtrl endpoint, and verifies the operator receives the response.
 
 The second scenario is the one that matters: a REAL sealed v1 envelope is built
 with the shipped reference client's crypto, carried through the relay by a fake
@@ -45,6 +45,19 @@ def _load_reference_client():
 
 
 rpc = _load_reference_client()
+
+
+class _FakeClock:
+    """Clock the no-poll-gap test can advance without sleeping."""
+
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
 
 
 def _seal_request(key: bytes, tok: str, method: str, params: dict | None = None) -> dict:
@@ -110,12 +123,14 @@ def _get(url: str, token: str | None = None) -> tuple[int, bytes]:
 
 def main() -> int:
     operator = "selftest-operator-token-0123456789"
+    clock = _FakeClock()
     state = RelayState(
         operator,
         enrollment_ttl=30,
-        device_ttl=30,
+        device_ttl=60 * 60,
         poll_timeout=5,
         operator_timeout=5,
+        clock=clock,
     )
     server = make_server("127.0.0.1", 0, state)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -151,6 +166,7 @@ def main() -> int:
         registration = json.loads(body)
         device_id = registration["device_id"]
         device_token = registration["device_token"]
+        assert registration["poll_timeout"] == 5, registration
 
         # Enrollment is single-use.
         status, _ = _post(
@@ -215,6 +231,61 @@ def main() -> int:
         assert poll_result["operator_status"] == 200, poll_result
         assert poll_result["operator_body"] == response_body
 
+        # Regression: the old 3-minute TTL expired during Phase 0's 30-minute
+        # background criterion. Advance past the old TTL but stay inside the new
+        # one, then prove the same token still carries a full request cycle.
+        clock.advance(31 * 60)
+        post_gap_poll: dict[str, object] = {}
+
+        def poll_after_gap() -> None:
+            status, body = _post(
+                base + "/v1/device/poll",
+                None,
+                device_token,
+            )
+            post_gap_poll["status"] = status
+            post_gap_poll["body"] = body
+
+        post_gap_thread = threading.Thread(target=poll_after_gap)
+        post_gap_thread.start()
+        threading.Event().wait(0.2)
+
+        post_gap_operator: dict[str, object] = {}
+
+        def operator_after_gap() -> None:
+            status, body = _post(
+                base + "/v1/operator/devices/" + device_id + "/rpc",
+                request_body,
+                operator,
+            )
+            post_gap_operator["status"] = status
+            post_gap_operator["body"] = body
+
+        post_gap_operator_thread = threading.Thread(target=operator_after_gap)
+        post_gap_operator_thread.start()
+        post_gap_thread.join(timeout=10)
+        assert not post_gap_thread.is_alive(), "post-gap poll did not return"
+        assert post_gap_poll["status"] == 200, post_gap_poll
+        post_gap_work = json.loads(post_gap_poll["body"])
+        assert base64.b64decode(post_gap_work["body_b64"]) == request_body
+        status, body = _post(
+            base + "/v1/device/response",
+            json.dumps(
+                {
+                    "request_id": post_gap_work["request_id"],
+                    "status": 200,
+                    "body_b64": base64.b64encode(response_body).decode("ascii"),
+                    "content_type": "application/json",
+                }
+            ).encode(),
+            device_token,
+        )
+        assert status == 200, (status, body)
+        post_gap_operator_thread.join(timeout=10)
+        assert not post_gap_operator_thread.is_alive(), "post-gap operator request did not return"
+        assert post_gap_operator["status"] == 200, post_gap_operator
+        assert post_gap_operator["body"] == response_body
+
         status, _ = _post(
             base + "/v1/operator/devices/" + device_id + "/rpc",
             request_body,
@@ -239,7 +310,8 @@ def main() -> int:
         _sealed_envelope_scenario(base, operator)
 
         print("relay self-test: PASS")
-        print("  registration, single-use enrollment, long-poll forwarding, response return")
+        print("  registration, single-use enrollment, poll forwarding, response return")
+        print("  device token survives a simulated 31-minute no-poll gap")
         print("  opaque request/response bytes")
         print("  unknown operator/device token rejection")
         print("  a real v1 sealed envelope opens after the round trip")
@@ -281,7 +353,7 @@ def _sealed_envelope_scenario(base: str, operator: str) -> None:
     outcome: dict[str, object] = {}
 
     def device_half() -> None:
-        # 1. Long-poll and take the operator's work.
+        # 1. Poll and take the operator's work.
         status, body = _post(base + "/v1/device/poll", None, device_token)
         outcome["poll_status"] = status
         work = json.loads(body)

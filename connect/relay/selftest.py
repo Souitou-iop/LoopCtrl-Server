@@ -60,6 +60,22 @@ class _FakeClock:
         self.value += seconds
 
 
+class _ThreadSafeClock(_FakeClock):
+    """Advanceable clock safe to read from the HTTP worker threads."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+
+    def __call__(self) -> float:
+        with self._lock:
+            return self.value
+
+    def advance(self, seconds: float) -> None:
+        with self._lock:
+            self.value += seconds
+
+
 def _seal_request(key: bytes, tok: str, method: str, params: dict | None = None) -> dict:
     """Build a v1 request envelope exactly as the reference client does."""
     body = json.dumps(
@@ -307,11 +323,14 @@ def main() -> int:
         assert status == 200, (status, body)
         assert json.loads(body)["devices"][0]["device_id"] == device_id
 
+        _pending_wait_timeout_scenarios(operator)
         _sealed_envelope_scenario(base, operator)
 
         print("relay self-test: PASS")
         print("  registration, single-use enrollment, poll forwarding, response return")
         print("  device token survives a simulated 31-minute no-poll gap")
+        print("  pending operator waits receive 410 at device expiry")
+        print("  pending operator waits still receive 504 at operator timeout")
         print("  opaque request/response bytes")
         print("  unknown operator/device token rejection")
         print("  a real v1 sealed envelope opens after the round trip")
@@ -320,6 +339,87 @@ def main() -> int:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def _pending_wait_timeout_scenarios(operator: str) -> None:
+    """Prove pending waits end at the right deadline, not in a blind sleep."""
+    scenarios = [
+        # Name, device TTL, operator timeout, whether device expiry wins.
+        ("device_expiry", 0.5, 5.0, True),
+        ("operator_timeout", 30.0, 0.5, False),
+    ]
+    for name, device_ttl, operator_timeout, expect_expiry in scenarios:
+        clock = _ThreadSafeClock()
+        state = RelayState(
+            operator,
+            enrollment_ttl=5,
+            device_ttl=device_ttl,
+            poll_timeout=0.1,
+            operator_timeout=operator_timeout,
+            clock=clock,
+        )
+        server = make_server("127.0.0.1", 0, state)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{server.server_port}"
+        try:
+            status, body = _post(base + "/v1/admin/enrollments", b"{}", operator)
+            assert status == 201, (name, status, body)
+            enrollment = json.loads(body)["enrollment_token"]
+            status, body = _post(
+                base + "/v1/device/register",
+                b'{"name":"sleeping-device"}',
+                enrollment,
+            )
+            assert status == 201, (name, status, body)
+            device_id = json.loads(body)["device_id"]
+
+            result: dict[str, object] = {}
+
+            def operator_call() -> None:
+                status, body = _post(
+                    base + "/v1/operator/devices/" + device_id + "/rpc",
+                    b"opaque",
+                    operator,
+                )
+                result["status"] = status
+                result["body"] = body
+
+            operator_thread = threading.Thread(target=operator_call)
+            operator_thread.start()
+            # Let the operator request enter the server-held wait before the
+            # fake clock advances.
+            threading.Event().wait(0.2)
+            real_started = time.monotonic()
+            stop_advancing = threading.Event()
+            def advance_clock() -> None:
+                # A fake clock must move for time-based waits. Advance it in
+                # real time so the deadline path is exercised exactly as it is
+                # in production, without waiting for the configured TTL.
+                while not stop_advancing.wait(0.01):
+                    clock.advance(0.01)
+
+            advance_thread = threading.Thread(target=advance_clock, daemon=True)
+            advance_thread.start()
+            try:
+                max_wait = 1.0 if expect_expiry else 2.0
+                operator_thread.join(timeout=max_wait)
+                assert not operator_thread.is_alive(), f"{name}: operator request hung"
+                elapsed = time.monotonic() - real_started
+                assert elapsed < max_wait, (name, f"returned after {elapsed:.3f}s")
+            finally:
+                stop_advancing.set()
+                advance_thread.join(timeout=1)
+
+            expected_status = 410 if expect_expiry else 504
+            assert result.get("status") == expected_status, (name, result)
+            error = json.loads(result["body"]).get("error")
+            expected_error = "device_session_expired" if expect_expiry else "device_timeout"
+            assert error == expected_error, (name, error)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
 
 def _sealed_envelope_scenario(base: str, operator: str) -> None:

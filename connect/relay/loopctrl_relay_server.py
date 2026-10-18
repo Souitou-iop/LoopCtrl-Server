@@ -253,8 +253,38 @@ class RelayState:
         pending.done.set()
         return True
 
-    def wait_for_response(self, pending: _PendingRequest) -> bool:
-        return pending.done.wait(timeout=self.operator_timeout)
+    def wait_for_response(
+        self, pending: _PendingRequest, session: _DeviceSession
+    ) -> bool:
+        """Wait for a device response, but never past the device's TTL.
+
+        A device that never polls again must release its pending operator
+        request at session expiry; otherwise the operator waits for the full
+        (possibly much longer) operator timeout while the request is already
+        undeliverable. The wait is capped to the session deadline, and the
+        session is dropped (signalling every pending request) when that
+        deadline is reached.
+        """
+        started_at = self._clock()
+        operator_deadline = started_at + self.operator_timeout
+        while True:
+            now = self._clock()
+            with self._lock:
+                current = self._devices_by_id.get(session.device_id)
+                if current is not session or pending.request_id not in session.in_flight:
+                    # A concurrent expiry/completion already owns the outcome.
+                    return pending.done.is_set()
+                device_deadline = session.expires_at
+                if device_deadline <= now:
+                    self._drop_session_locked(session)
+                    return True
+            if operator_deadline <= now:
+                return False
+            wait_for = min(operator_deadline - now, device_deadline - now)
+            if pending.done.wait(timeout=wait_for):
+                return True
+            # Re-evaluate the live session after the wait. A device poll may
+            # have extended it, or another thread may have dropped it.
 
     def expire_pending(self, pending: _PendingRequest) -> None:
         with self._lock:
@@ -485,7 +515,7 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         if pending is None:
             self._json(429 if failure == "device_busy" else 410, {"error": failure})
             return
-        if not self.relay.wait_for_response(pending):
+        if not self.relay.wait_for_response(pending, session):
             self.relay.expire_pending(pending)
             self._json(504, {"error": "device_timeout"})
             return

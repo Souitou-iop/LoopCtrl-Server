@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile
+        run: python -m compileall -q connect cli && python -m py_compile cli/loopctrl
+      - name: Relay self-test
+        run: python connect/relay/selftest.py
+      - name: CLI help
+        run: |
+          python cli/loopctrl direct --help > /dev/null
+          python cli/loopctrl relay --help > /dev/null
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: check . cli/loopctrl
+      - name: Shell scripts
+        run: shellcheck connect/relay/systemd/render-unit.sh
+      - name: Compose files
+        run: |
+          cp connect/relay/relay.env.example connect/relay/relay.env
+          docker compose -f connect/relay/docker-compose.yml config -q
+          HEADSCALE_DOMAIN=hs.example.com docker compose -f connect/headscale/docker-compose.yml config -q
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the relay image
+        run: docker build -t loopctrl-relay:ci connect/relay
+      - name: Smoke test
+        run: |
+          docker run -d --name relay -p 127.0.0.1:8787:8787 \
+            -e LOOPCTRL_RELAY_OPERATOR_TOKEN=ci-token-0123456789abcdefghij \
+            -e LOOPCTRL_RELAY_PUBLIC_SERVER=relay.test \
+            loopctrl-relay:ci
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8787/healthz && exit 0; sleep 1; done
+          docker logs relay; exit 1

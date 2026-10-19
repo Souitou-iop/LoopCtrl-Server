@@ -29,7 +29,7 @@ import time
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Scripts"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "cli"))
 from loopctrl_rpc import (  # noqa: E402
     LABEL_ENC_REQ, LABEL_ENC_RESP, LABEL_MAC, LABEL_PAIR, LABEL_WRAP,
     _X25519_BASE, _hmac, _keystream_xor, _x25519,
@@ -132,7 +132,7 @@ def call(base: str, device_id: str, method: str, params: dict) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--relay", default="http://127.0.0.1:8787", help="relay base URL, path prefix allowed")
+    parser.add_argument("--relay", default=os.environ.get("LOOPCTRL_RELAY_URL", "http://127.0.0.1:8787"), help="relay base URL, path prefix allowed")
     sub = parser.add_subparsers(dest="command", required=True)
     key = sub.add_parser("key")
     key.add_argument("--name")

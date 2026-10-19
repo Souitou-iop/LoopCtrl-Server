@@ -28,6 +28,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import queue
@@ -69,6 +70,12 @@ DEVICE_ID = re.compile(r"^dev_[0-9a-f]{16}$")
 KNOWN_CAPABILITIES = ("view_screen", "control", "launch_apps", "read_text")
 
 _TOKEN_CONTEXT = b"loopctrl-relay-token-v1"
+# Peers whose X-Real-IP header is believed: the reverse proxy in front.
+DEFAULT_TRUSTED_PROXIES = "127.0.0.1/32,::1/128"
+
+
+def parse_networks(spec: str) -> tuple[Any, ...]:
+    return tuple(ipaddress.ip_network(part.strip(), strict=False) for part in spec.split(",") if part.strip())
 
 
 def _hash_token(token: str) -> bytes:
@@ -638,6 +645,7 @@ class RelayHTTPServer(ThreadingHTTPServer):
 
     def __init__(self, address: tuple[str, int], state: RelayState) -> None:
         self.state = state
+        self.trusted_proxies = parse_networks(DEFAULT_TRUSTED_PROXIES)
         super().__init__(address, RelayRequestHandler)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
@@ -674,9 +682,16 @@ class RelayRequestHandler(BaseHTTPRequestHandler):
         sys.stderr.flush()
 
     def _source(self) -> str:
-        # Behind nginx every peer is loopback; trust its header only then.
+        # Behind nginx every peer is the proxy (loopback by default, or a
+        # container bridge gateway); trust its header only then.
         peer = self.client_address[0]
-        if peer in ("127.0.0.1", "::1"):
+        server = self.server
+        trusted = server.trusted_proxies if isinstance(server, RelayHTTPServer) else ()
+        try:
+            address = ipaddress.ip_address(peer.split("%", 1)[0])
+        except ValueError:
+            return peer
+        if any(address in network for network in trusted):
             return self.headers.get("X-Real-IP", peer)
         return peer
 
@@ -1001,6 +1016,10 @@ def main() -> int:
     parser.add_argument("--certfile", help="optional PEM certificate")
     parser.add_argument("--keyfile", help="optional PEM private key")
     parser.add_argument("--device-ttl", type=int, default=DEFAULT_DEVICE_TTL)
+    parser.add_argument("--trusted-proxies",
+                        default=os.environ.get("LOOPCTRL_RELAY_TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES),
+                        help="comma-separated networks whose X-Real-IP header is used for rate limits "
+                             "(default: loopback; add the Docker bridge when nginx reaches a container)")
     args = parser.parse_args()
 
     operator_token = os.environ.get("LOOPCTRL_RELAY_OPERATOR_TOKEN", "")
@@ -1013,10 +1032,16 @@ def main() -> int:
     if bool(args.certfile) != bool(args.keyfile):
         print("--certfile and --keyfile must be supplied together", file=sys.stderr)
         return 2
+    try:
+        trusted_proxies = parse_networks(args.trusted_proxies)
+    except ValueError as exc:
+        print(f"--trusted-proxies: {exc}", file=sys.stderr)
+        return 2
 
     state = RelayState(operator_token, args.public_server, state_file=args.state_file,
                        default_organization=args.organization, device_ttl=args.device_ttl)
     server = make_server(args.bind, args.port, state, certfile=args.certfile, keyfile=args.keyfile)
+    server.trusted_proxies = trusted_proxies
     scheme = "https" if args.certfile else "http"
     print(f"LoopCtrl relay (API v{API_VERSION}) listening on {scheme}://{args.bind}:{server.server_port} "
           f"as {state.server}; secrets are never logged", flush=True)

@@ -2,7 +2,7 @@
 """Device-test operator for the Phase 0 relay: sealed /rpc calls and timings.
 
 Seals each call with the existing LoopCtrl v1 envelope (the pairing key from
-~/.loopctrl/token.json, via Scripts/loopctrl_rpc.py), sends it through the
+~/.loopctrl/token.json, via cli/loopctrl_rpc.py), sends it through the
 relay's operator endpoint, opens the sealed response, and reports timings. The
 relay sees only the opaque envelope.
 
@@ -32,12 +32,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _load_rpc():
     spec = importlib.util.spec_from_file_location(
-        "loopctrl_rpc", _ROOT / "Scripts" / "loopctrl_rpc.py")
+        "loopctrl_rpc", _ROOT / "cli" / "loopctrl_rpc.py")
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -152,7 +152,8 @@ def summary(label: str, samples: list[dict]) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--relay", default="https://relay.ebato.top")
+    ap.add_argument("--relay", default=os.environ.get("LOOPCTRL_RELAY_URL", "http://127.0.0.1:8787"),
+                    help="relay base URL, path prefix allowed (env LOOPCTRL_RELAY_URL)")
     ap.add_argument("--device-id", help="relay device id (from relay_operator.py --list)")
     ap.add_argument("--key", required=True, help="token.json record, e.g. device:<id>")
     ap.add_argument("--direct", metavar="HOST:PORT", help="bypass the relay")

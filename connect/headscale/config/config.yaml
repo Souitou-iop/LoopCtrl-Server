@@ -20,8 +20,8 @@ prefixes:
 derp:
   # Our own relay, reached through the same HTTPS name as the control server
   # (DERP rides an HTTP upgrade through nginx), plus STUN on UDP 3478, which
-  # must be open in the cloud security group. Clients near it (mainland China)
-  # pick it over Tailscale's public relays, which stay listed as a fallback.
+  # must be open in the cloud security group. This is the only relay offered
+  # to clients: public Tailscale DERP regions are deliberately not listed.
   server:
     enabled: true
     region_id: 999
@@ -32,8 +32,7 @@ derp:
     private_key_path: /var/lib/headscale/derp_server_private.key
     automatically_add_embedded_derp_region: true
     ipv4: SERVER_IPV4
-  urls:
-    - https://controlplane.tailscale.com/derpmap/default
+  urls: []
   paths: []
   auto_update_enabled: true
   update_frequency: 3h

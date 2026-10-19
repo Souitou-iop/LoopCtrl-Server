@@ -1,3 +1,5 @@
+<p align="right"><b>English</b> · <a href="README.zh-CN.md">简体中文</a></p>
+
 # LoopCtrl-Server
 
 The connection layer for [LoopCtrl](https://github.com/Souitou-iop/LoopCtrl):

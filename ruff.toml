@@ -1,0 +1,8 @@
+# Lint for correctness only: pyflakes plus pycodestyle errors. The code is
+# standard-library Python and deliberately not reformatted.
+target-version = "py310"
+line-length = 120
+
+[lint]
+select = ["E", "F", "W"]
+ignore = ["E402", "E501", "E731"]

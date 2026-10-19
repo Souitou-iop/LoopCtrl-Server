@@ -1,0 +1,30 @@
+# LoopCtrl relay behind your own TLS reverse proxy. See docs/self-host-relay.md.
+#
+#   cp relay.env.example relay.env && $EDITOR relay.env    # token + public URL
+#   install -d -m 0700 -o 10001 -g 10001 state            # the image runs as uid 10001
+#   docker compose up -d
+#
+# The relay speaks plain HTTP on 127.0.0.1:8787; nginx (or Caddy, …) in front
+# terminates TLS. state/state.json keeps enrolled devices (public keys only)
+# across restarts.
+services:
+  relay:
+    image: ghcr.io/souitou-iop/loopctrl-relay:${RELAY_VERSION:-latest}
+    build: .
+    container_name: loopctrl-relay
+    restart: unless-stopped
+    env_file: relay.env
+    environment:
+      LOOPCTRL_RELAY_STATE_FILE: /data/state.json
+      # Published ports reach the container from the bridge gateway, so trust
+      # X-Real-IP from there too (it only feeds the per-address rate limits).
+      LOOPCTRL_RELAY_TRUSTED_PROXIES: ${RELAY_TRUSTED_PROXIES:-127.0.0.1/32,::1/128,172.16.0.0/12}
+    ports:
+      - "127.0.0.1:${RELAY_PORT:-8787}:8787"
+    volumes:
+      - ./state:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

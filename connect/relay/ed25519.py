@@ -5,6 +5,18 @@ challenge and the unbind header. Verification is all it needs in production;
 `sign` is here for the self-test. This follows the RFC's reference code and is
 not constant time, which is fine for verifying public signatures but means
 `sign` must not be used with a secret that matters.
+
+Adapted from the reference code in RFC 8032 section 6, a Code Component of
+that RFC:
+
+    Copyright (c) 2017 IETF Trust and the persons identified as authors of
+    the code. All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, is permitted pursuant to, and subject to the license terms
+    contained in, the Revised BSD License set forth in Section 4.c of the IETF
+    Trust's Legal Provisions Relating to IETF Documents
+    (https://trustee.ietf.org/license-info).
 """
 from __future__ import annotations
 
